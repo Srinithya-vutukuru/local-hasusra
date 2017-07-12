@@ -1,131 +1,109 @@
-# Prerequisites
+**NOTE:** If you have already setup local development before version ``v0.11.0``, please delete your minikube instance and start afresh. You can take dump of the database if you want to keep the data.
 
-- Install [virtualbox](https://www.virtualbox.org/wiki/Downloads).
-  - You should have atleast 4GB of RAM (because the VM might take upto 2GB of RAM)
-  - You should have a 64bit system (Windows or Mac or Linux)
-- Windows users: install [`git-bash`](https://git-for-windows.github.io/):
-  - You can use [this git bash installation guide](https://blog.hasura.io/setting-up-git-bash-for-windows-e26b59e44257) for reference
-  - Use `git-bash` for running all the subsequent commands in this README!
-- Install `hasuractl`.
-  - Windows:
+# Pre-requisites
 
-    Download [hasuractl.exe](https://storage.googleapis.com/hasuractl/v0.1.4/windows-amd64/hasuractl.exe) and place it in your `PATH`. Refer to this [video reference](https://drive.google.com/file/d/0B_G1GgYOqazYUDJFcVhmNHE1UnM/view) if you need help with the installation on Windows.
-
-  - Linux:
-
-    ```
-    curl -Lo hasuractl https://storage.googleapis.com/hasuractl/v0.1.4/linux-amd64/hasuractl && chmod +x hasuractl && sudo mv hasuractl /usr/local/bin/
-    ```
-
-    Feel free to leave off the `sudo mv hasuractl /usr/local/bin` if you would like to add hasuractl to your path manually
-
-  - Mac:
-
-    ```
-    curl -Lo hasuractl https://storage.googleapis.com/hasuractl/v0.1.4/darwin-amd64/hasuractl && chmod +x hasuractl && sudo mv hasuractl /usr/local/bin/
-    ```
-
-    Feel free to leave off the `sudo mv hasuractl /usr/local/bin` if you would like to add hasuractl to your path manually
-
+- Install [minikube](https://github.com/kubernetes/minikube/releases/tag/v0.18.0) (version ``0.18.0``) . Do not install version ``0.19.0``. There are issues with kube-dns shipped with minikube 0.19.
 - Install latest kubectl (>= 1.6.0) (https://kubernetes.io/docs/tasks/kubectl/install/)
+- Install [`jq`](https://stedolan.github.io/jq/), a super handy tool for managing JSON from the command line.
 
-### NOTE:
+# Instructions:
 
-- If you are on windows, you should only use git-bash to execute commands that you see in this documentation.
-- If you already have hasuractl installed, replace the old binary with the new one.
+- Start minikube:
 
-# Starting hasura
+  ```
+  minikube start --kubernetes-version v1.6.3
+  ```
 
-1. Create an account on [beta.hasura.io](https://beta.hasura.io) if you do not have one
+- Clone this repo and cd into the directory.
+  ```
+  git clone https://github.com/hasura/local-development.git
+  cd local-development
+  ```
 
-2. Run:
+- Edit ``controller-configmap.yaml`` and set the ``gatewayIp`` field to the ip of your minikube instance. You can get this by running:
 
-   ```
-   hasuractl login
-   ```
+  ```
+  minikube ip
+  ```
 
-3. After you have successfully logged in, run this command:
+- Now create the necessary resources to setup the platform
+  ```
+  kubectl create -f project-conf.yaml
+  kubectl create -f project-secrets.yaml
+  kubectl create ns hasura
+  kubectl create -f controller-configmap.yaml
+  ```
 
-   **NOTE:** Please be advised that if you are running the next command for the first time, it will roughly download about 1-1.5GB of docker images.
+**NOTE:** The next steps will roughly download about 1-1.5GB of docker images.
 
-   ```
-   hasuractl local start
-   ```
+- Now, initialise the Hasura project (this will run initialise the state for the platform, eg: running initial schema migrations)
+  ``` 
+  kubectl create -f platform-init.yaml
+  ```
+  It can take a while, follow the logs by running: ``kubectl logs platform-init-v0.11.0 -n hasura --follow``
 
-   It might take a long time for this to finish, depending on your internet connection. The command exits by pointing you to a url to login to the console.
+  When you see a line that says "**successfully initialised the platform's state**", you can move onto the next step.
 
-# Stopping hasura
+- Now, run the Hasura platform. This will bring up all the services and keeps them in sync with the project configuration. 
+  ```
+  kubectl create -f platform-sync.yaml
+  ```
+  Again, this command will take some time because all the docker images for running these services will be downloaded. You'll probably have to wait between 5mins to upwards of 20mins depending on your Internet connection. 
+  To check the status of the project, run: ``kubectl get cm hasura-project-status -o json | jq -r '.data.services' | jq '.summary.tag'``
+  This should output a value "**Synced**", which means that you're good to go!
 
-```
-hasuractl local stop
-```
+- To access the platform on a domain, we make use of ``vcap.me``, a domain which always points to 127.0.0.1. For this to work, we have to setup port forwarding:
+  - For Windows, follow instructions here: https://github.com/hasura/support/issues/275#issuecomment-303976934.
+  - On Linux/Mac, Run:
 
-This will stop the running hasura platform. You can start it again by running `hasuractl local start`.
+    ```
+    export GW_IP=$(minikube ip) && sudo ssh -N -o UserKnownHostsFile=/dev/null -L 80:$GW_IP:80 -L 2022:$GW_IP:2022 docker@$GW_IP
+    ```
+    Paste the above command as is (don't substitute any values) into your terminal and run it. The default password for `docker` user is `tcuser`. This will forward port 80 (and hence the sudo) and 2022 on your local machine to the minikube cluster. Once the SSH command runs succesfully, keep that terminal open and don't close it. Ignore this terminal for subsequent instructions.
+- Your Hasura project should now be accessible at http://console.vcap.me.
+  ``kubectl -n hasura get pods`` shows all the Hasura platform services as running (data, auth, console, sshd, postgres, session-redis etc.)
+- Login to the console with: ``admin``, ``adminpassword``
+- Postgres login: ``admin``, ``pgpassword``
 
-# Cleaning hasura
+# Errors:
 
-If you like to clean the existing hasura platform to start afresh, you can run this:
+When ``platform-init`` fails, we have to clean up the state as follows before trying again
 
-```
-hasuractl local clean
-```
+  ```
+  # Clean up the state
+  kubectl delete configmap hasura-project-status
+  kubectl delete ns hasura # This will take some time
+  minikube ssh "sudo rm -rf /data/hasura.io"
+  kubectl create ns hasura
 
-**NOTE**: The above command will delete all data and configuration. However, the underlying VM is not deleted and hence the downloaded images still exist inside the VM. This is what you should be using if you plan to run `hasuractl local start` again. If you would also like to delete the underlying VM, you should run this:
+  # Run init once again
+  kubectl create -f platform-init.yaml
+  ```
 
-```
-hasuractl local delete
-```
+# Cleanup/Uninstall the project
 
-The above command will delete the the VM completely and hence all the downloaded images with it.
+This will cleanup/uninstall the project including the data in the database.
 
-# Exposing your local hasura project over internet
+- Delete the created resources:
 
-`hasuractl local start` gives you a URL (eg, `c100.hasura.me`) that points to your local project, but this URL only works locally on your computer.
+  ```
+  kubectl delete ns hasura
+  kubectl delete configmap hasura-project-status
+  kubectl delete configmap hasura-project-conf
+  kubectl delete secret hasura-project-secrets
+  ```
+- Delete the data directory:
 
-If you need your iOS/Android app to access the project, or share the project publicly, you need to expose the project over internet. To do this, login to your beta dashboard, go to https://beta.hasura.io/local-development, and modify the Public URL. After this, you can run
+  **Be careful!**. This will delete all data in the database. Take a dump of the data before this if you want to.
 
-```
-hasuractl local expose
-```
+  ```
+  minikube ssh "sudo rm -rf /data/hasura.io"
+  ```
+If you want to install again, you can start from the "Instructions" sections in this README.
 
-Now, you can access your project at the Public URL you've configured.
+# Exposing local minikube to public Internet
 
-**NOTE**:
-On Windows, currently the command does not output anything. It works nonetheless.
-
-
-# Adding your ssh key
-
-Adding your SSH key enables you to use the `git push` feature. To add your ssh key, you can run
-
-```
-hasuractl project add-ssh-key
-```
-
-### NOTE:
-
-- Your public key has to exist before running this command. If you don't have a public key, you can follow the instructions [here](https://help.github.com/articles/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent/#generating-a-new-ssh-key).
-- You can also add the public key from the advanced settings in the console.
-
-# Updating the platform version:
-
-The current version of the platform is `v0.12.3`. No major features are added since `v0.11`. However, we will provide instructions to upgrade to `v0.12` soon.
-
-# Common errors & troubleshooting:
-
-1) Windows:
-   ```
-   ...The system cannot find the PATH specified.
-   ```
-   You've not added `hasuractl` to the `PATH` correctly and/or you're not using `git-bash`.
-
-2) Virtualbox or minikube errors:
-
-   If you are facing errors of the type: `Error getting state for host: machine does not exist`, try each of the following:
-
-   1. Run `hasuractl local stop` and after a few minutes (check your virtualbox console to see if the VM has actually stopped), run `hasuractl local start` again and everything should be back up.
-   2. If that doesn't work, run `hasuractl local clean`, wait for a few minutes and then `hasuractl local start` again.
-   3. If none of the above work, remove the `~/.minihasura` folder and start everything from the beginning of this guide again viz. `hasuractl login`, `hasuractl local start`.
+Follow the instructions here: https://github.com/hasura/ngrok
 
 # Upcoming features
-- Migration from local development to Kubernetes cluster on any cloud provider.
+- Migration from local development (minikube) to Kubernetes cluster on any cloud provider.
